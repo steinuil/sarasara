@@ -17,10 +17,21 @@
       {
         defaultPackage = naersk'.buildPackage {
           src = ./.;
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [ openssl ];
         };
 
         devShell = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ rustc cargo rust-analyzer ];
+          buildInputs = with pkgs; [
+            rustc
+            cargo
+            rust-analyzer
+            cargo-watch
+            rustfmt
+            pkg-config
+            openssl
+            rnix-lsp
+          ];
         };
       });
 }
