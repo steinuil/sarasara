@@ -1,5 +1,5 @@
 {
-  description = "A very basic flake";
+  description = "Podcast RSS feed for RaiPlay sound";
 
   inputs = {
     nixpkgs.url = "nixpkgs/nixos-unstable";

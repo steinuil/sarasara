@@ -184,6 +184,6 @@ async fn main() -> tide::Result<()> {
 
     app.at("/programmi/:program").get(proxy_rss);
 
-    app.listen("0.0.0.0:8080").await?;
+    app.listen(opts.bind_address).await?;
     Ok(())
 }
