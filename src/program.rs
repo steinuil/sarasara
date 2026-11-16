@@ -169,7 +169,5 @@ fn make_audio_url(base: &Url, secret: &signature::Secret, url_param: &str) -> St
         .append_pair("url", url_param)
         .append_pair("sig", &sig);
 
-    dbg!(url.query());
-
     url.to_string()
 }

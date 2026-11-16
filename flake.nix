@@ -31,7 +31,7 @@
           rustc = toolchain;
         };
 
-        package = rustPlatform.buildPackage {
+        package = rustPlatform.buildRustPackage {
           pname = "sarasara";
           version = "0.1.0";
           src = self;
@@ -39,29 +39,17 @@
         };
       in
       {
-        # defaultPackage = naersk'.buildPackage {
-        #   src = ./.;
-        #   nativeBuildInputs = with pkgs; [ pkg-config ];
-        #   buildInputs = with pkgs; [ openssl ];
-        # };
+        defaultPackage = package;
+        packages = {
+          default = package;
+          sarasara = package;
+        };
 
         devShell = pkgs.mkShell {
           buildInputs = [
             toolchain
             pkgs.rust-analyzer
             pkgs.lldb
-
-            # openssl
-            # pkg-config
-
-            # rustc
-            # cargo
-            # rust-analyzer
-            # cargo-watch
-            # rustfmt
-            # pkg-config
-            # openssl
-            # rnix-lsp
           ];
         };
       }

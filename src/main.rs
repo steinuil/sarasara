@@ -155,6 +155,10 @@ async fn proxy_audio(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("crypto provider already installed");
+
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug,tower_http=debug,axum::rejection=trace,reqwest=debug,hyper_util=debug,hyper=debug".into()))
         .with(tracing_subscriber::fmt::layer().with_ansi(false).without_time())
