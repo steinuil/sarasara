@@ -33,7 +33,7 @@
 
         package = rustPlatform.buildRustPackage {
           pname = "sarasara";
-          version = "0.1.0";
+          version = "0.3.0";
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
         };
