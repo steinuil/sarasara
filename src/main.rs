@@ -1,294 +1,185 @@
-use clap::Parser;
+mod program;
+mod signature;
 
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, Query, State},
+    response::{IntoResponse, Response},
+};
+use clap::Parser;
+use reqwest::StatusCode;
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use url::Url;
+
+/// An RSS proxy for RaiPlay Sound.
+///
+/// Transforms the JSON returned by RaiPlay Sound's /programming/{program_name}.json API
+/// into RSS fit for consumption by a podcast client, and proxies audio requests, removing
+/// same-site headers.
+///
+/// The audio URLs in the RSS feed are signed using the secret provided in the
+/// SARASARA_PROXY_SECRET env variable to prevent bad actors from using this endpoint
+/// as a public proxy.
 #[derive(Parser)]
-struct CliOptions {
+struct Options {
     #[clap(long, default_value = "0.0.0.0:8080")]
     pub bind_address: String,
 
+    /// Public base URL of the server, used for the audio proxy.
     #[clap(long)]
-    pub public_url: surf::Url,
+    pub public_url: Url,
 
+    /// URL of RaiPlay Sound.
+    ///
+    /// You probably don't need to modify this.
     #[clap(long, default_value = "https://www.raiplaysound.it")]
-    pub raiplaysound_url: surf::Url,
+    pub raiplaysound_url: Url,
+
+    /// Hex secret used to sign the audio URLs to proxy.
+    ///
+    /// Should be at least 32 bytes. You can generate it with `openssl rand -hex 32`.
+    ///
+    /// It should not change between runs, or the URLs cached by podcast clients will become invalid!
+    #[clap(long, env = "SARASARA_PROXY_SECRET", hide_env_values = true, value_parser = signature::parse)]
+    pub proxy_secret: signature::Secret,
+
+    /// Value of the User-Agent header used by the audio proxy.
+    #[clap(long, default_value = "Firefox")]
+    pub proxy_user_agent: String,
 }
 
 #[derive(Clone)]
-struct State {
-    pub raiplaysound_url: surf::Url,
-    pub public_url: surf::Url,
+struct Params {
+    pub raiplaysound_url: Url,
+    pub public_url: Url,
+    pub proxy_secret: signature::Secret,
+    pub proxy_user_agent: String,
 }
 
-#[derive(Clone, serde::Deserialize)]
-struct Genre {
-    pub name: String,
-}
+pub struct Rss(pub String);
 
-#[derive(Clone, serde::Deserialize)]
-struct PodcastInfo {
-    pub title: String,
-    pub description: String,
-    pub image: String,
-    pub editor: String,
-    pub weblink: String,
-    pub genres: Vec<Genre>,
-    pub subgenres: Vec<Genre>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct TrackInfo {
-    pub date: String,
-    pub page_url: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct Audio {
-    pub url: String,
-    pub duration: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct Card {
-    pub uniquename: String,
-    pub toptitle: String,
-    pub description: String,
-    pub audio: Audio,
-    pub image: String,
-    pub track_info: TrackInfo,
-    pub episode: Option<String>,
-    pub season: Option<String>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct Block {
-    pub cards: Vec<Card>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct RaiPlayProgram {
-    pub podcast_info: PodcastInfo,
-    pub block: Block,
-}
-
-fn parse_date(date: &str) -> Option<time::OffsetDateTime> {
-    if date.len() != 10 {
-        return None;
-    }
-
-    let year: i32 = date[..4].parse().ok()?;
-    let month: u8 = date[5..7].parse().ok()?;
-    let day: u8 = date[8..].parse().ok()?;
-
-    Some(
-        time::PrimitiveDateTime::new(
-            time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?,
-            time::Time::MIDNIGHT,
+impl IntoResponse for Rss {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::response::AppendHeaders([(http::header::CONTENT_TYPE, "application/xml")]),
+            self.0,
         )
-        .assume_offset(time::UtcOffset::UTC),
-    )
+            .into_response()
+    }
 }
 
-fn make_url(base_url: &surf::Url, path: &str) -> String {
-    let mut url = base_url.clone();
-    url.set_path(path);
-    url.to_string()
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error("not found")]
+    NotFound,
+
+    #[error("upstream: {0}")]
+    Upstream(#[from] reqwest::Error),
+
+    #[error("invalid signature")]
+    InvalidSignature,
 }
 
-fn concat_url_path_with_slash(base: &surf::Url, path: &str) -> surf::Url {
-    let mut url = base.clone();
-    let base_path = url.path();
-    let path = match (base_path.strip_suffix('/'), path.strip_prefix('/')) {
-        (Some(base_path), Some(path)) => format!("{base_path}/{path}"),
-        (None, None) => format!("{base_path}/{path}"),
-        (Some(base_path), None) => format!("{base_path}/{path}"),
-        (None, Some(path)) => format!("{base_path}/{path}"),
-    };
-    url.set_path(&path);
-    url
-}
-
-fn make_audio_url(base: &surf::Url, url_param: &str) -> String {
-    let mut url = concat_url_path_with_slash(base, "/audio");
-    // possible bug: what if the URL contains &?
-    url.set_query(Some(&format!("url={}", url_param)));
-    url.to_string()
-}
-
-impl RaiPlayProgram {
-    fn into_rss(self, raiplaysound_url: &surf::Url, public_url: &surf::Url) -> rss::Channel {
-        rss::Channel {
-            title: self.podcast_info.title.clone(),
-            link: make_url(raiplaysound_url, &self.podcast_info.weblink),
-            description: self.podcast_info.description.clone(),
-            managing_editor: Some(self.podcast_info.editor),
-            categories: self
-                .podcast_info
-                .genres
-                .into_iter()
-                .chain(self.podcast_info.subgenres.into_iter())
-                .map(|genre| rss::Category {
-                    name: genre.name,
-                    domain: None,
-                })
-                .collect(),
-            generator: Some("sarasara https://github.com/steinuil/sarasara".to_string()),
-            image: Some(rss::Image {
-                url: make_url(raiplaysound_url, &self.podcast_info.image),
-                title: self.podcast_info.title,
-                description: Some(self.podcast_info.description),
-                link: make_url(raiplaysound_url, &self.podcast_info.weblink),
-                ..Default::default()
-            }),
-            items: self
-                .block
-                .cards
-                .into_iter()
-                .map(|card| rss::Item {
-                    title: Some(card.toptitle),
-                    link: Some(make_url(raiplaysound_url, &card.track_info.page_url)),
-                    description: Some(card.description),
-                    pub_date: parse_date(&card.track_info.date).and_then(|date| {
-                        date.format(&time::format_description::well_known::Rfc2822)
-                            .ok()
-                    }),
-                    enclosure: Some(rss::Enclosure {
-                        url: make_audio_url(public_url, &card.audio.url),
-                        mime_type: "audio/mpeg".to_string(),
-                        length: "".to_string(),
-                    }),
-                    guid: Some(rss::Guid {
-                        value: card.uniquename,
-                        permalink: false,
-                    }),
-                    itunes_ext: Some(rss::extension::itunes::ITunesItemExtension {
-                        image: Some(make_url(raiplaysound_url, &card.image)),
-                        duration: Some(card.audio.duration),
-                        episode: card.episode,
-                        season: card.season,
-                        ..Default::default()
-                    }),
-
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            AppError::NotFound => StatusCode::NOT_FOUND.into_response(),
+            AppError::Upstream(e) => {
+                tracing::error!("upstream error: {e}");
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+            AppError::InvalidSignature => StatusCode::FORBIDDEN.into_response(),
         }
     }
 }
 
-async fn proxy_rss(req: tide::Request<State>) -> tide::Result<tide::Response> {
-    let program_name = req.param("program")?;
+async fn proxy_rss(
+    State(params): State<Arc<Params>>,
+    Path(program_name): Path<String>,
+) -> Result<Rss, AppError> {
+    let mut url = params.raiplaysound_url.clone();
+    url.set_path(&format!("programmi/{program_name}.json"));
 
-    let mut url = req.state().raiplaysound_url.clone();
-    url.set_path(&format!("programmi/{}.json", program_name));
-    let mut program = surf::get(url).await?;
-
-    if program.status() != 200 {
-        return Ok(tide::Response::new(404));
+    let resp = reqwest::get(url).await?;
+    if resp.status() == StatusCode::NOT_FOUND {
+        return Err(AppError::NotFound);
     }
 
-    let body_json: RaiPlayProgram = program.body_json().await?;
+    let program: program::RaiPlayProgram = resp.error_for_status()?.json().await?;
 
-    Ok(tide::Response::builder(200)
-        .body(tide::Body::from_string(
-            body_json
-                .into_rss(&req.state().raiplaysound_url, &req.state().public_url)
-                .to_string(),
-        ))
-        .content_type("application/xml")
-        .build())
+    Ok(Rss(program.into_rss(&params).to_string()))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct AudioQueryParams {
     pub url: String,
+    pub sig: String,
 }
 
-const MAX_REDIRECTS: u8 = 3;
+const MAX_REDIRECTS: usize = 3;
+const BAD_HEADERS: [&str; 4] = ["host", "origin", "src-fetch-mode", "src-fetch-site"];
 
-// Possible issue: this basically acts as a universal proxy.
-// It's kind of hard to vet URLs that pass through this because, from my testing, there's a LOT of domains
-// the podcasts could be hosted on.
-async fn resolve_audio(url: surf::Url) -> tide::Result<tide::Response> {
-    let mut current_url = url;
-
-    // Follow 302 redirects until we hit a 200, but guard against too many redirects
-    for _ in 0..MAX_REDIRECTS {
-        let mut resp = surf::get(&current_url).send().await?;
-
-        match resp.status() {
-            surf::StatusCode::Ok => {
-                let mut resp_out = tide::Response::builder(200);
-
-                for name in resp.header_names() {
-                    match name.as_str() {
-                        "host" | "origin" | "src-fetch-mode" | "src-fetch-site" => {}
-                        _ => {
-                            resp_out = resp_out.header(name, resp.header(name).unwrap());
-                        }
-                    }
-                }
-
-                resp_out = resp_out.body(resp.take_body());
-
-                return Ok(resp_out.build());
-            }
-            surf::StatusCode::Found => match resp.header("Location") {
-                Some(v) => {
-                    current_url = surf::Url::parse(v.last().as_str())?;
-                }
-                None => {
-                    return Ok(tide::Response::builder(500)
-                        .body(tide::Body::from_string(
-                            "received 302 but no Location header found".to_string(),
-                        ))
-                        .build())
-                }
-            },
-            code => {
-                return Ok(tide::Response::builder(code)
-                    .body(tide::Body::from_string(
-                        "received unexpected status code".to_string(),
-                    ))
-                    .build())
-            }
-        }
+async fn proxy_audio(
+    State(params): State<Arc<Params>>,
+    Query(args): Query<AudioQueryParams>,
+) -> Result<Response, AppError> {
+    if !signature::verify(&params.proxy_secret, &args.url, &args.sig) {
+        return Err(AppError::InvalidSignature);
     }
 
-    Ok(tide::Response::builder(500)
-        .body(tide::Body::from_string("too many redirects!".to_string()))
-        .build())
+    let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .user_agent(&params.proxy_user_agent)
+        .build()?
+        .get(&args.url)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut resp_out = Response::builder().status(StatusCode::OK);
+
+    for (key, val) in resp
+        .headers()
+        .iter()
+        .filter(|(key, _)| !BAD_HEADERS.contains(&key.as_str()))
+    {
+        resp_out = resp_out.header(key, val);
+    }
+
+    Ok(resp_out
+        .body(axum::body::Body::from_stream(resp.bytes_stream()))
+        .expect("valid response"))
 }
 
-async fn proxy_audio(req: tide::Request<State>) -> tide::Result<tide::Response> {
-    let query_params: AudioQueryParams = req.query()?;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug,tower_http=debug,axum::rejection=trace,reqwest=debug,hyper_util=debug,hyper=debug".into()))
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).without_time())
+        .init();
 
-    let url = match surf::Url::parse(&query_params.url) {
-        Ok(url) => url,
-        Err(e) => {
-            return Ok(tide::Response::builder(500)
-                .body(tide::Body::from_string(format!("{e}")))
-                .content_type("text/plain")
-                .build())
-        }
-    };
+    let opts = Options::parse();
 
-    resolve_audio(url).await
-}
+    let app = axum::Router::new()
+        .route("/programmi/{program}", axum::routing::get(proxy_rss))
+        .route("/audio", axum::routing::get(proxy_audio))
+        .with_state(Arc::new(Params {
+            raiplaysound_url: opts.raiplaysound_url,
+            public_url: {
+                let mut url = opts.public_url;
+                let path = url.path().to_string();
+                url.set_path(path.trim_suffix("/"));
+                url
+            },
+            proxy_secret: opts.proxy_secret,
+            proxy_user_agent: opts.proxy_user_agent,
+        }))
+        .layer(TraceLayer::new_for_http());
 
-#[async_std::main]
-async fn main() -> tide::Result<()> {
-    let opts = CliOptions::parse();
+    let listener = tokio::net::TcpListener::bind(opts.bind_address).await?;
+    axum::serve(listener, app).await?;
 
-    tide::log::start();
-
-    let mut app = tide::with_state(State {
-        raiplaysound_url: opts.raiplaysound_url,
-        public_url: opts.public_url,
-    });
-
-    app.at("/programmi/:program").get(proxy_rss);
-    app.at("/audio").get(proxy_audio);
-
-    app.listen(opts.bind_address).await?;
     Ok(())
 }

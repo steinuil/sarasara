@@ -1,18 +1,24 @@
 [package]
 name = "sarasara"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-async-std = { version = "1.12.0", features = ["attributes"] }
+anyhow = { version = "1.0.104", features = ["backtrace"] }
+axum = "0.8.9"
+clap = { version = "4.6", features = ["derive", "env"] }
+hex = "0.4.3"
+hmac = "0.13.0"
+http = "1.5.0"
+jiff = "1"
+reqwest = { version = "0.13", features = ["json", "stream"] }
+rss = "2.1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tide = "0.16"
-clap = { version = "3.2", features = ["derive"] }
-surf = { version = "2.3.2", default-features = false, features = [
-  "h1-client-rustls",
-  "middleware-logger",
-  "encoding"
-] }
-rss = "2.0"
-time = { version = "0.3", features = [ "formatting" ] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2.5.8", features = ["serde"] }

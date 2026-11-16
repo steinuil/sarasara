@@ -23,4 +23,23 @@ Un proxy che converte l'API `/programmi/:name.json` di [RaiPlay sound](https://w
 
 Gli audiolibri (quelli con `/audiolibri/` nell'url) al momento non sono supportati, se li volete fate un fischio.
 
-Le radio non funzionano e non funzioneranno perché sono fuori dall'ambito dei podcast.
+Le radio non funzionano e non funzioneranno (come i centri in Albania) perché sono fuori dall'ambito dei podcast.
+
+## Come funziona
+
+`sarasara` espone due endpoint: `/programmi/{program_name}` e `/audio`.
+
+`/programmi/{program_name}` va a prendersi il `.json` corrispondente al nome del programma su Rai Play e lo converte in RSS.
+
+`/audio` è un semplice proxy. Purtroppo è necessario perché i server su cui sono hostati gli audio del podcast settano degli header che dicono ai browser di rifiutare la richiesta, e perché fanno un check sullo User-Agent che blocca client che non sono browser (tipo le app dei podcast). Il proxy toglie questi header e accetta qualunque User-Agent.
+
+L'endpoint prende due parametri nella query: l'url da fare da proxy, e la firma dell'URL. La firma viene generata quando viene creato l'RSS e fa in modo che il proxy possa solo essere utilizzato per URL che vengono dall'RSS.
+
+## Setup sul vostro server
+
+Compila con `cargo run` e piazza sul server. Se eseguito con `--help` mostra tutti i parametri che possono essere impostati.
+
+Sono richiesti questi parametri:
+
+- `SARASARA_PROXY_SECRET` (variabile d'ambiente), che viene usata come chiave per firmare gli URL audio.
+- `--public-url`, che diventa la base degli URL audio.
